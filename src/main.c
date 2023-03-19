@@ -7,82 +7,122 @@
 #include "himem.h"
 #include "pcm8pp.h"
 #include "ym2608_decode.h"
+#include "kmd.h"
 
 #define PROGRAM_NAME     "S44BGP.X"
-#define PROGRAM_VERSION  "0.2.0 (2023/03/19)"
+#define PROGRAM_VERSION  "0.2.1 (2023/03/20)"
 
 #define MAX_MUSIC (32)
+#define MAX_PATH_LEN (256)
 
 #define FREAD_BUFFER_LEN (44100 * 4)
 #define YM2608_DECODE_BUFFER_BYTES (44100 * 4 * 2)
 
+#define TIMERD_COUNT_INTERVAL (16)
+
 #define SJIS_ONPU "\x81\xf4"
 
 static int16_t g_num_music;
-static int16_t g_current_music;
 static int16_t* g_music_addr[ MAX_MUSIC ];
 static uint32_t g_music_size[ MAX_MUSIC ];
 static uint8_t g_music_name[ MAX_MUSIC ][ 256 ];
-static int16_t g_paused;
+static KMD_HANDLE g_music_kmd[ MAX_MUSIC ];
 static uint32_t g_pcm8pp_mode;
-static uint32_t g_int_counter;
 static int16_t g_quiet_mode;
-static uint32_t g_elapsed_time;
+static int16_t g_shuffle_mode;
+
+volatile static int16_t g_current_music;
+volatile static int16_t g_paused;
+volatile static int32_t g_int_counter;
+volatile static uint32_t g_elapsed_time;
 
 //
 //  timer-D interrupt handler
 //
 static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
 
+  // total play time
   if (!g_paused) {
     g_elapsed_time += 10;
   }
 
-  if (g_int_counter == 0) {
-    if (B_SFTSNS() & 0x0002) {                // CTRL key
+  // check playback stop
+  if (g_int_counter == 8) {
+    if (!g_paused && pcm8pp_get_data_length(0) == 0) {
+      g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
+      g_music_kmd[ g_current_music ].current_event_ofs = 0;
+      pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 44100*256, g_music_addr[ g_current_music ]);
+      if (!g_quiet_mode) {
+        B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
+        B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+      }
+      g_paused = 0;
+      g_elapsed_time = 0;
+    }
+  }
+
+  // check pause/resume
+  if (g_int_counter == 5) {
+    if (B_SFTSNS() & 0x02) {                  // CTRL key
       int32_t sense_code = BITSNS(0x0b);
       if (sense_code & 0x01) {                // CTRL + XF4 (pause/resume)
         if (g_paused) {
           pcm8pp_resume();
           if (!g_quiet_mode) {
             B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-            B_PUTMES(6, 2, 31, 46, g_music_name[ g_current_music ]);
+            if (g_music_kmd[ g_current_music ].tag_title[0] != '\0') {
+              B_PUTMES(6, 2, 31, 62, g_music_kmd[ g_current_music ].tag_title);
+            } else {
+              B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+            }
           }
           g_paused = 0;
         } else {
           pcm8pp_pause();
           if (!g_quiet_mode) {
-            B_PUTMES(6, 0, 31, 48, SJIS_ONPU "PAUSED");
+            B_PUTMES(6, 0, 31, 64, SJIS_ONPU "PAUSED");
           }
           g_paused = 1;
         }
-        g_int_counter = 16;
-      } else if (sense_code & 0x02) {         // CTRL + XF5 (next)
-        pcm8pp_pause();
+      } else if (sense_code & 0x02) {         // CTRL + XF5 (skip)
         pcm8pp_stop();
-        g_current_music = (g_current_music + 1) % g_num_music;
+        g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
+        g_music_kmd[ g_current_music ].current_event_ofs = 0;
         pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 44100*256, g_music_addr[ g_current_music ]);
         if (!g_quiet_mode) {
           B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-          B_PUTMES(6, 2, 31, 46, g_music_name[ g_current_music ]);
+          if (g_music_kmd[ g_current_music ].tag_title[0] != '\0') {
+            B_PUTMES(6, 2, 31, 62, g_music_kmd[ g_current_music ].tag_title);
+          } else {
+            B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+          }
         }
         g_paused = 0;
-        g_int_counter = 16;
-      }
-    } else {
-      if (!g_paused && pcm8pp_get_data_length(0) == 0) {
-        g_current_music = (g_current_music + 1) % g_num_music;
-        pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 44100*256, g_music_addr[ g_current_music ]);
-        if (!g_quiet_mode) {
-          B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-          B_PUTMES(6, 2, 31, 46, g_music_name[ g_current_music ]);
-        }
-        g_paused = 0;
-        g_int_counter = 16;        
+        g_elapsed_time = 0;
       }
     }
-  } else if (g_int_counter > 0) {
-    g_int_counter--;
+  }
+
+  // check KMD event
+  if (g_int_counter == 3) {
+    if (!g_quiet_mode) {
+      KMD_HANDLE* kmd = &(g_music_kmd[ g_current_music ]);
+      if (kmd->current_event_ofs < kmd->num_events) {
+        KMD_EVENT* event = &(kmd->events[ kmd->current_event_ofs ]);
+        if (event->start_msec <= 1000) {      // do not show first 1 sec KMD events to ensure file name display
+          kmd->current_event_ofs++;
+        } else if (event->start_msec <= g_elapsed_time) {
+          B_PUTMES(6, event->pos_x * 2, 31, 64, event->message);
+          kmd->current_event_ofs++;
+        }
+      }
+    }
+  }
+
+  // countdown
+  g_int_counter--;
+  if (g_int_counter < 0) {
+    g_int_counter = TIMERD_COUNT_INTERVAL;
   }
 
 }
@@ -133,13 +173,18 @@ static uint8_t* check_keep_process(const uint8_t* exec_name) {
 static void show_help_message() {
   printf("usage: s44bgp [options] <file1.(s44|a44)> [<file2.(s44|a44)> ...]\n");
   printf("options:\n");
-  printf("   -r    ... remove s44bgp\n");
+  printf("   -r    ... remove running s44bgp\n");
+  printf("   -h    ... show help message\n");
+  printf("\n");
+  printf("   -i <file> ... indirect file\n");
+  printf("\n");
   printf("   -v<n> ... volume (1-15, default:8)\n");
+  printf("   -s    ... shuffle mode\n");
+  printf("   -q    ... quiet mode\n");
+  printf("\n");
   printf("   -2    ... 22.05kHz mode\n");
   printf("   -8    ... 8bit PCM mode\n");
   printf("   -m    ... mono mode\n");
-  printf("   -q    ... quiet mode\n");
-  printf("   -h    ... show help message\n");
 }
 
 //
@@ -156,6 +201,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   int16_t pcm_half_rate = 0;
   int16_t pcm_half_bit = 0;
   int16_t pcm_channels = 2;
+  int16_t shuffle_mode = 0;
   int16_t quiet_mode = 0;
   int16_t num_music = 0;
 
@@ -168,12 +214,16 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   // ym2608 decode handle
   YM2608_DECODE_HANDLE ym2608_decode = { 0 };
 
-  // credit
-  printf("S44BGP.X - 16bit linear PCM data background player version " PROGRAM_VERSION " by tantan\n");
-
   // init buffer table
   memset(g_music_addr, 0, sizeof(int16_t*) * MAX_MUSIC);
   memset(g_music_size, 0, sizeof(uint32_t) * MAX_MUSIC);
+  memset(g_music_kmd, 0, sizeof(KMD_HANDLE) * MAX_MUSIC);
+  for (int16_t i = 0; i < MAX_MUSIC; i++) {
+    g_music_name[i][0] = '\0';
+  }
+
+  // credit
+  printf("S44BGP.X - 16bit PCM background player for Mercury-UNIT version " PROGRAM_VERSION " by tantan\n");
 
   // check command line
   if (argc < 2) {
@@ -198,8 +248,50 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         pcm_half_bit = 1;
       } else if (argv[i][1] == 'm') {
         pcm_channels = 1;
+      } else if (argv[i][1] == 's') {
+        shuffle_mode = 1;
+        srand(_PSP);
       } else if (argv[i][1] == 'q') {
         quiet_mode = 1;
+      } else if (argv[i][1] == 'i' && i+1 < argc) {
+
+        // indirect file
+        fp = fopen(argv[i+1], "r");
+        if (fp != NULL) {
+
+          static uint8_t line[ MAX_PATH_LEN + 1 ];
+
+          while (fgets(line, MAX_PATH_LEN, fp) != NULL) {
+
+            for (int16_t i = 0; i < MAX_PATH_LEN; i++) {
+              if (line[i] <= ' ') {
+                line[i] = '\0';
+                break;
+              }
+            }
+
+            if (strlen(line) < 5) continue;
+
+            if (num_music > MAX_MUSIC) {
+              printf("error: too many music.\n");
+              goto exit;
+            }
+      
+            uint8_t* pcm_filename = line;
+            uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
+            if (stricmp(pcm_fileext, ".s44") != 0 && stricmp(pcm_fileext, ".a44")) {
+              printf("error: not .s44/.a44 data file. (%s)\n", pcm_filename);
+              goto exit;
+            }
+            strcpy(g_music_name[ num_music++ ], pcm_filename);
+
+          }
+
+          fclose(fp);
+          fp = NULL;
+
+        }
+        i++;
       } else if (argv[i][1] == 'h') {
         show_help_message();
         goto exit;
@@ -208,6 +300,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         goto exit;
       }
     } else {
+
       if (num_music > MAX_MUSIC) {
         printf("error: too many music.\n");
         goto exit;
@@ -263,13 +356,13 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // check high memory driver availability
   if (!himem_isavailable()) {
-    printf("error: high memory is not available.\n");
+    printf("error: high memory driver is not available.\n");
     goto exit;
   }
 
   // check pcm8pp
   if (!pcm8pp_keepchk()) {
-    printf("error: pcm8pp.x is not running.\n");
+    printf("error: PCM8PP.X is not running.\n");
     goto exit;
   }
 
@@ -295,17 +388,30 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   // load pcm data to high memory
   for (int16_t i = 0; i < num_music; i++) {
 
-    // open a pcm file
+    // ym2608 adpcm format?
     uint8_t* pcm_filename = g_music_name[i];
+    uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
+    int16_t ym2608 = stricmp(pcm_fileext, ".a44") == 0 ? 1 : 0;
+
+    // kmd
+    static uint8_t kmd_filename[ MAX_PATH_LEN ];
+    strcpy(kmd_filename, pcm_filename);
+    strcpy(kmd_filename + strlen(kmd_filename) - 4, ".kmd");
+    fp = fopen(kmd_filename, "r");
+    if (fp != NULL) {
+      if (kmd_init(&g_music_kmd[i], fp) != 0) {
+        printf("warn: KMD file read error. (%s)\n", kmd_filename);
+      }
+      fclose(fp);
+      fp = NULL;      
+    }
+
+    // open a pcm file
     fp = fopen(pcm_filename, "rb");
     if (fp == NULL) {
       printf("error: file open error. (%s)\n", pcm_filename);
       goto exit;
     }
-
-    // ym2608 adpcm format?
-    uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
-    int16_t ym2608 = stricmp(pcm_fileext, ".a44") == 0 ? 1 : 0;
 
     // check data length in 16bit unit
     fseek(fp, 0, SEEK_END);
@@ -542,11 +648,12 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // global counters
   g_num_music = num_music;
-  g_current_music = 0;
-  g_paused = 0;
-  g_int_counter = 0;
+  g_shuffle_mode = shuffle_mode;
   g_quiet_mode = quiet_mode;
+  g_paused = 0;
   g_elapsed_time = 0;
+  g_current_music = g_shuffle_mode ? rand() % g_num_music : 0;
+  g_int_counter = TIMERD_COUNT_INTERVAL;
 
   // pcm8pp parameters
   int16_t pcm8pp_volume = pcm_volume;
@@ -572,7 +679,11 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 1, g_music_addr[ g_current_music ]);
   if (!quiet_mode) {
     B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-    B_PUTMES(6, 2, 31, 46, g_music_name[ g_current_music ]);
+    if (g_music_kmd[ g_current_music ].tag_title[0] != '\0') {
+      B_PUTMES(6, 2, 31, 62, g_music_kmd[ g_current_music ].tag_title);
+    } else {
+      B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+    }
   }
 
   printf("\n" PROGRAM_NAME " background playback service started. [CTRL]+[XF4] to pause. [CTRL]+[XF5] to skip.\n");
@@ -601,6 +712,7 @@ exit:
       himem_free(g_music_addr[i], 1);
       g_music_addr[i] = NULL;
     }
+    kmd_close(&g_music_kmd[i]);
   }
 
   // reclaim file read buffer if opened

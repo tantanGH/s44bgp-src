@@ -7,7 +7,7 @@ fi
 
 TARGET_FILE="S44BGP.X"
 DOC_FILE="../S44BGP.DOC"
-ZIP_FILE="../../S44BG010.ZIP"
+ZIP_FILE="../../S44BG020.ZIP"
 
 CC=${XDEV68K_DIR}/m68k-toolchain/bin/m68k-elf-gcc
 GAS2HAS="${XDEV68K_DIR}/util/x68k_gas2has.pl -cpu 68000 -inc doscall.inc -inc iocscall.inc"
@@ -55,7 +55,7 @@ function do_compile() {
 }
 
 function build_s44bgp() {
-  do_compile . "pcm8pp himem ym2608_decode main" "ym2608_adpcmlib"
+  do_compile . "pcm8pp himem ym2608_decode kmd main" "ym2608_adpcmlib"
   if [ $? != 0 ]; then
     return $?
   fi
