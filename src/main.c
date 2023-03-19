@@ -8,28 +8,13 @@
 #include "pcm8pp.h"
 #include "ym2608_decode.h"
 #include "kmd.h"
+#include "s44bgp.h"
 
-#define PROGRAM_NAME     "S44BGP.X"
-#define PROGRAM_VERSION  "0.2.1 (2023/03/20)"
-
-#define MAX_MUSIC (32)
-#define MAX_PATH_LEN (256)
-
-#define FREAD_BUFFER_LEN (44100 * 4)
-#define YM2608_DECODE_BUFFER_BYTES (44100 * 4 * 2)
-
-#define TIMERD_COUNT_INTERVAL (16)
-
-#define SJIS_ONPU "\x81\xf4"
-
+static PCM_MUSIC g_pcm_music[ MAX_MUSIC ];
 static int16_t g_num_music;
-static int16_t* g_music_addr[ MAX_MUSIC ];
-static uint32_t g_music_size[ MAX_MUSIC ];
-static uint8_t g_music_name[ MAX_MUSIC ][ 256 ];
-static KMD_HANDLE g_music_kmd[ MAX_MUSIC ];
-static uint32_t g_pcm8pp_mode;
 static int16_t g_quiet_mode;
 static int16_t g_shuffle_mode;
+static uint32_t g_pcm8pp_mode;
 
 volatile static int16_t g_current_music;
 volatile static int16_t g_paused;
@@ -50,11 +35,16 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
   if (g_int_counter == 8) {
     if (!g_paused && pcm8pp_get_data_length(0) == 0) {
       g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
-      g_music_kmd[ g_current_music ].current_event_ofs = 0;
-      pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 44100*256, g_music_addr[ g_current_music ]);
+      PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
+      pcm->kmd.current_event_ofs = 0;
+      pcm8pp_play(0, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
       if (!g_quiet_mode) {
         B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-        B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+        if (pcm->kmd.tag_title[0] != '\0') {
+          B_PUTMES(6, 2, 31, 64, pcm->kmd.tag_title);
+        } else {
+          B_PUTMES(6, 2, 31, 64, pcm->file_name);
+        }
       }
       g_paused = 0;
       g_elapsed_time = 0;
@@ -69,32 +59,34 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
         if (g_paused) {
           pcm8pp_resume();
           if (!g_quiet_mode) {
+            PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
             B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-            if (g_music_kmd[ g_current_music ].tag_title[0] != '\0') {
-              B_PUTMES(6, 2, 31, 62, g_music_kmd[ g_current_music ].tag_title);
+            if (pcm->kmd.tag_title[0] != '\0') {
+              B_PUTMES(6, 2, 31, MAX_DISP_LEN - 2, pcm->kmd.tag_title);
             } else {
-              B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+              B_PUTMES(6, 2, 31, MAX_DISP_LEN - 2, pcm->file_name);
             }
           }
           g_paused = 0;
         } else {
           pcm8pp_pause();
           if (!g_quiet_mode) {
-            B_PUTMES(6, 0, 31, 64, SJIS_ONPU "PAUSED");
+            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "PAUSED");
           }
           g_paused = 1;
         }
       } else if (sense_code & 0x02) {         // CTRL + XF5 (skip)
         pcm8pp_stop();
         g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
-        g_music_kmd[ g_current_music ].current_event_ofs = 0;
-        pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 44100*256, g_music_addr[ g_current_music ]);
+        PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
+        pcm->kmd.current_event_ofs = 0;
+        pcm8pp_play(0, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
         if (!g_quiet_mode) {
           B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-          if (g_music_kmd[ g_current_music ].tag_title[0] != '\0') {
-            B_PUTMES(6, 2, 31, 62, g_music_kmd[ g_current_music ].tag_title);
+          if (pcm->kmd.tag_title[0] != '\0') {
+            B_PUTMES(6, 2, 31, MAX_DISP_LEN - 2, pcm->kmd.tag_title);
           } else {
-            B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+            B_PUTMES(6, 2, 31, MAX_DISP_LEN - 2, pcm->file_name);
           }
         }
         g_paused = 0;
@@ -106,13 +98,14 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
   // check KMD event
   if (g_int_counter == 3) {
     if (!g_quiet_mode) {
-      KMD_HANDLE* kmd = &(g_music_kmd[ g_current_music ]);
+      PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
+      KMD_HANDLE* kmd = &(pcm->kmd);
       if (kmd->current_event_ofs < kmd->num_events) {
         KMD_EVENT* event = &(kmd->events[ kmd->current_event_ofs ]);
-        if (event->start_msec <= 1000) {      // do not show first 1 sec KMD events to ensure file name display
+        if (event->start_msec <= 500) {      // do not show first 0.5 sec KMD events to ensure file name display
           kmd->current_event_ofs++;
         } else if (event->start_msec <= g_elapsed_time) {
-          B_PUTMES(6, event->pos_x * 2, 31, 64, event->message);
+          B_PUTMES(6, event->pos_x * 2, 31, MAX_DISP_LEN, event->message);
           kmd->current_event_ofs++;
         }
       }
@@ -139,26 +132,20 @@ static uint8_t* check_keep_process(const uint8_t* exec_name) {
   for (;;) {
     uint32_t parent = B_LPEEK((uint32_t*)(psp + 4));
     if (parent == 0) {
-//      printf("no more parent.\n");
       break;
     }
-//    printf("parent=%08X\n", parent);
     psp = (uint8_t*)parent;
   }
 
   // check memory blocks
   for (;;) {
-//    printf("checking process at %08X\n",psp);
     if (B_BPEEK((uint8_t*)(psp + 4)) == 0xff) {
-//      printf("found keep process.\n");
-//      printf("[%s]\n",psp + 196);
       if (stricmp(psp + 196, exec_name) == 0) {   // assuming this keep process is in the user land
         return psp + 16;    // return PDB
       }
     }
     uint32_t child = B_LPEEK((uint32_t*)(psp + 12));
     if (child == 0) {
-//      printf("no more process to check.\n");
       break;
     }
     psp = (uint8_t*)child;
@@ -205,6 +192,12 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   int16_t quiet_mode = 0;
   int16_t num_music = 0;
 
+  // init PCM_MUSIC array
+  memset(g_pcm_music, 0, sizeof(PCM_MUSIC) * MAX_MUSIC);
+  for (int16_t i = 0; i < MAX_MUSIC; i++) {
+    memcpy(g_pcm_music[i].eye_catch, EYE_CATCH, EYE_CATCH_LEN);
+  }
+ 
   // file read pointer
   FILE* fp = NULL;
 
@@ -213,14 +206,6 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // ym2608 decode handle
   YM2608_DECODE_HANDLE ym2608_decode = { 0 };
-
-  // init buffer table
-  memset(g_music_addr, 0, sizeof(int16_t*) * MAX_MUSIC);
-  memset(g_music_size, 0, sizeof(uint32_t) * MAX_MUSIC);
-  memset(g_music_kmd, 0, sizeof(KMD_HANDLE) * MAX_MUSIC);
-  for (int16_t i = 0; i < MAX_MUSIC; i++) {
-    g_music_name[i][0] = '\0';
-  }
 
   // credit
   printf("S44BGP.X - 16bit PCM background player for Mercury-UNIT version " PROGRAM_VERSION " by tantan\n");
@@ -283,7 +268,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
               printf("error: not .s44/.a44 data file. (%s)\n", pcm_filename);
               goto exit;
             }
-            strcpy(g_music_name[ num_music++ ], pcm_filename);
+            strcpy(g_pcm_music[ num_music++ ].file_name, pcm_filename);
 
           }
 
@@ -316,7 +301,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         printf("error: not .s44/.a44 data file. (%s)\n", pcm_filename);
         goto exit;
       }
-      strcpy(g_music_name[ num_music++ ], pcm_filename);
+      strcpy(g_pcm_music[ num_music++ ].file_name, pcm_filename);
     }
   }
 
@@ -327,19 +312,43 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   if (remove_mode) {
     // self keep check
     if (pdp != NULL) {
+
+      // stop PCM8PP
       pcm8pp_pause();
       pcm8pp_stop();
+
+      // release timer-D interrupt handle
       TIMERDST(0,0,0);
+
+      // release allocated high memory buffers
+      uint8_t* mem_end = (uint8_t*)B_LPEEK((uint32_t*)(pdp - 8));
+      uint8_t* check_addr = (uint8_t*)(pdp + 256);
+      while (check_addr < mem_end) {
+        if (memcmp(check_addr, EYE_CATCH, EYE_CATCH_LEN) == 0) {
+          //printf("found eye catch at %X\n", check_addr);
+          uint32_t himem_addr = B_LPEEK((uint32_t*)(check_addr + EYE_CATCH_LEN));
+          himem_free((void*)himem_addr, 1);
+        }
+        check_addr += 4;
+      }
+
+      // release program memory itself
       MFREE((uint32_t)pdp);
+
+      // reset function key display
       int32_t fnkmod = C_FNKMOD(-1);
       //C_FNKMOD(2);
       C_FNKMOD(fnkmod);
+
       printf("removed " PROGRAM_NAME " successfully.\n");
+
       rc = 0;
+
     } else {
       printf(PROGRAM_NAME " is not running.\n");
       rc = 1;
     }
+
     goto exit;
   }
 
@@ -380,16 +389,19 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   }
 
   // information
-  printf(" PCM frequency: %d [Hz]\n", pcm_half_rate ? 22050 : 44100);
-  printf(" PCM channels: %s\n", pcm_channels == 1 ? "mono" : "stereo");
-  printf(" PCM bits: %d\n", pcm_half_bit ? 8 : 16);
+  printf("PCM frequency: %d [Hz]\n", pcm_half_rate ? 22050 : 44100);
+  printf("PCM channels: %s\n", pcm_channels == 1 ? "mono" : "stereo");
+  printf("PCM bits: %d\n", pcm_half_bit ? 8 : 16);
   printf("\n");
+  printf("Available high memory: %d [KB]\n", himem_getsize(1) / 1024);
 
   // load pcm data to high memory
   for (int16_t i = 0; i < num_music; i++) {
 
+    PCM_MUSIC* pcm = &(g_pcm_music[i]);
+
     // ym2608 adpcm format?
-    uint8_t* pcm_filename = g_music_name[i];
+    uint8_t* pcm_filename = pcm->file_name;
     uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
     int16_t ym2608 = stricmp(pcm_fileext, ".a44") == 0 ? 1 : 0;
 
@@ -399,7 +411,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     strcpy(kmd_filename + strlen(kmd_filename) - 4, ".kmd");
     fp = fopen(kmd_filename, "r");
     if (fp != NULL) {
-      if (kmd_init(&g_music_kmd[i], fp) != 0) {
+      if (kmd_init(&(pcm->kmd), fp) != 0) {
         printf("warn: KMD file read error. (%s)\n", kmd_filename);
       }
       fclose(fp);
@@ -420,8 +432,8 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
     // allocate high memory
     size_t allocate_bytes = data_len * sizeof(int16_t) * (ym2608 ? 4 : 1) / (3 - pcm_channels) / (1 + pcm_half_rate) / (1 + pcm_half_bit);
-    g_music_addr[i] = himem_malloc(allocate_bytes, 1);
-    if (g_music_addr[i] == NULL) {
+    pcm->buffer = himem_malloc(allocate_bytes, 1);
+    if (pcm->buffer == NULL) {
       printf("error: high memory allocation error. (out of memory?)\n");
       goto exit;
     }
@@ -445,10 +457,10 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
           size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
           if (len == 0) break;
 
-          memcpy(g_music_addr[i] + read_len, fread_buffer, len * sizeof(int16_t));
-          read_len += len;
+          memcpy(pcm->buffer + read_len, fread_buffer, len * sizeof(int16_t));
 
-          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+          read_len += len;
+          printf("\rLoading %s (%4.2f%%) ... [SHIFT] key to cancel.", pcm_filename, read_len * 100.0 / data_len);
 
         } while (read_len < data_len);
 
@@ -459,7 +471,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         // stereo to mono and/or 44.1 to 22.05 down sampling
         size_t read_len = 0;
         uint32_t num_samples = 0;
-        int16_t* gma = g_music_addr[i];
+        int16_t* gma = pcm->buffer;
         do {
 
           if (B_SFTSNS() & 0x01) {
@@ -488,7 +500,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
           }
 
           read_len += len;
-          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+          printf("\rLoading %s (%4.2f%%) ... [SHIFT] key to cancel.", pcm_filename, read_len * 100.0 / data_len);
 
         } while (read_len < data_len);
 
@@ -499,7 +511,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         // stereo to mono and/or 44.1 to 22.05 down sampling
         size_t read_len = 0;
         uint32_t num_samples = 0;
-        int8_t* gma = (int8_t*)g_music_addr[i];
+        int8_t* gma = (int8_t*)pcm->buffer;
         do {
 
           if (B_SFTSNS() & 0x01) {
@@ -528,7 +540,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
           }
 
           read_len += len;
-          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+          printf("\rLoading %s (%4.2f%%) ... [SHIFT] key to cancel.", pcm_filename, read_len * 100.0 / data_len);
 
         } while (read_len < data_len);
 
@@ -545,7 +557,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         // stereo to mono and/or 44.1 to 22.05 down sampling
         size_t read_len = 0;
         uint32_t num_samples = 0;
-        int16_t* gma = g_music_addr[i];
+        int16_t* gma = pcm->buffer;
         do {
 
           if (B_SFTSNS() & 0x01) {
@@ -577,7 +589,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
           }
 
           read_len += len;
-          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+          printf("\rLoading %s (%4.2f%%) ... [SHIFT] key to cancel.", pcm_filename, read_len * 100.0 / data_len);
 
         } while (read_len < data_len);
 
@@ -588,7 +600,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         // stereo to mono and/or 44.1 to 22.05 down sampling
         size_t read_len = 0;
         uint32_t num_samples = 0;
-        int8_t* gma = (int8_t*)g_music_addr[i];
+        int8_t* gma = (int8_t*)pcm->buffer;
         do {
 
           if (B_SFTSNS() & 0x01) {
@@ -620,7 +632,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
           }
 
           read_len += len;
-          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+          printf("\rLoading %s (%4.2f%%) ... [SHIFT] key to cancel.", pcm_filename, read_len * 100.0 / data_len);
 
         } while (read_len < data_len);
 
@@ -631,9 +643,10 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     fclose(fp);
     fp = NULL;
 
-    g_music_size[i] = allocate_bytes;
+    pcm->buffer_bytes = allocate_bytes;
 
     printf("\rLoaded %s into high memory.\x1b[K\n", pcm_filename);
+    printf("Available high memory: %d [KB]\n", himem_getsize(1) / 1024);
   
   }
 
@@ -676,13 +689,14 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   }
 
   // start pcm8pp play
-  pcm8pp_play(0, g_pcm8pp_mode, g_music_size[ g_current_music ], 1, g_music_addr[ g_current_music ]);
+  PCM_MUSIC* current_pcm = &(g_pcm_music[ g_current_music ]);
+  pcm8pp_play(0, g_pcm8pp_mode, current_pcm->buffer_bytes, 44100*256, current_pcm->buffer);
   if (!quiet_mode) {
     B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-    if (g_music_kmd[ g_current_music ].tag_title[0] != '\0') {
-      B_PUTMES(6, 2, 31, 62, g_music_kmd[ g_current_music ].tag_title);
+    if (current_pcm->kmd.tag_title[0] != '\0') {
+      B_PUTMES(6, 2, 31, MAX_DISP_LEN - 2, current_pcm->kmd.tag_title);
     } else {
-      B_PUTMES(6, 2, 31, 62, g_music_name[ g_current_music ]);
+      B_PUTMES(6, 2, 31, MAX_DISP_LEN - 2, current_pcm->file_name);
     }
   }
 
@@ -708,11 +722,12 @@ exit:
 
   // reclaim high memory buffers if opened
   for (int16_t i = 0; i < MAX_MUSIC; i++) {
-    if (g_music_addr[i] != NULL) {
-      himem_free(g_music_addr[i], 1);
-      g_music_addr[i] = NULL;
+    PCM_MUSIC* pcm = &(g_pcm_music[i]);
+    if (pcm->buffer != NULL) {
+      himem_free(pcm->buffer, 1);
+      pcm->buffer = NULL;
     }
-    kmd_close(&g_music_kmd[i]);
+    kmd_close(&(pcm->kmd));
   }
 
   // reclaim file read buffer if opened

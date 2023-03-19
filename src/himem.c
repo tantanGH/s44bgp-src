@@ -39,6 +39,22 @@ static void __himem_free(void* ptr) {
 }
 
 //
+//  getsize high memory
+//
+size_t __himem_getsize() {
+
+    struct REGS in_regs = { 0 };
+    struct REGS out_regs = { 0 };
+
+    in_regs.d0 = 0xF8;          // IOCS _HIMEM
+    in_regs.d1 = 3;             // HIMEM_GETSIZE
+
+    TRAP15(&in_regs, &out_regs);
+  
+    return (size_t)out_regs.d0;
+}
+
+//
 //  resize high memory
 //
 int __himem_resize(void* ptr, size_t size) {
@@ -73,6 +89,13 @@ static void __mainmem_free(void* ptr) {
 }
 
 //
+//  getsize main memory
+//
+static size_t __mainmem_getsize() {
+  return (size_t)0;
+}
+
+//
 //  resize main memory
 //
 static int32_t __mainmem_resize(void* ptr, size_t size) {
@@ -95,6 +118,13 @@ void himem_free(void* ptr, int32_t use_high_memory) {
     } else {
         __mainmem_free(ptr);
     }
+}
+
+//
+//  getsize memory
+//
+size_t himem_getsize(int32_t use_high_memory) {
+    return use_high_memory ? __himem_getsize() : __mainmem_getsize();
 }
 
 //

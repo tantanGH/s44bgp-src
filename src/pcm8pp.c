@@ -26,7 +26,7 @@ int32_t pcm8pp_play(int16_t channel, uint32_t mode, uint32_t size, uint32_t freq
 
   return reg_d0;
 }
-
+/*
 //
 //  play in array chain mode ($001x)
 //
@@ -118,6 +118,7 @@ int32_t pcm8pp_set_channel_mode(int16_t channel, uint32_t mode, uint32_t freq) {
 
   return reg_d0;
 }
+*/
 
 //
 //  get data length ($008x)
@@ -135,7 +136,7 @@ int32_t pcm8pp_get_data_length(int16_t channel) {
 
   return reg_d0;
 }
-
+/*
 //
 //  get channel mode ($009x)
 //
@@ -169,7 +170,7 @@ int32_t pcm8pp_get_block_counter(int16_t channel) {
 
   return reg_d0;
 }
-
+*/
 //
 //  stop all channels ($0100)
 //
@@ -220,7 +221,7 @@ int32_t pcm8pp_resume() {
 
   return reg_d0;
 }
-
+/*
 //
 //  set max channels ($01fa)
 //
@@ -274,7 +275,7 @@ int32_t pcm8pp_set_frequency_mode(int16_t mode) {
 
   return reg_d0;
 }
-
+*/
 //
 //  pcm8pp keep check
 //

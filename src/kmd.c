@@ -40,7 +40,7 @@ int32_t kmd_init(KMD_HANDLE* kmd, FILE* fp) {
 
   // allocate the necessary memory
   kmd->num_events = num_events;
-  kmd->events = (KMD_EVENT*)himem_malloc(sizeof(KMD_EVENT) * kmd->num_events, 1);
+  kmd->events = (KMD_EVENT*)himem_malloc(sizeof(KMD_EVENT) * kmd->num_events, 0);
   if (kmd->events == NULL) goto exit;
 
   // pass 2 - read events
