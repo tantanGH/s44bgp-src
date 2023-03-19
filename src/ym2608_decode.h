@@ -26,6 +26,5 @@ int32_t ym2608_decode_init(YM2608_DECODE_HANDLE* nas, size_t decode_buffer_bytes
 void ym2608_decode_close(YM2608_DECODE_HANDLE* nas);
 size_t ym2608_decode_exec_buffer(YM2608_DECODE_HANDLE* nas, uint8_t* adpcm_data, size_t adpcm_data_bytes, int16_t* decode_buffer, size_t decode_buffer_len);
 size_t ym2608_decode_exec(YM2608_DECODE_HANDLE* nas, uint8_t* adpcm_data, size_t adpcm_data_bytes);
-size_t ym2608_decode_resample(YM2608_DECODE_HANDLE* nas, int16_t* resample_buffer, int32_t resample_freq, int16_t gain);
 
 #endif

@@ -55,7 +55,7 @@ function do_compile() {
 }
 
 function build_s44bgp() {
-  do_compile . "pcm8pp himem main" ""
+  do_compile . "pcm8pp himem ym2608_decode main" "ym2608_adpcmlib"
   if [ $? != 0 ]; then
     return $?
   fi

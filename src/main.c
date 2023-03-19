@@ -6,13 +6,15 @@
 #include <iocslib.h>
 #include "himem.h"
 #include "pcm8pp.h"
+#include "ym2608_decode.h"
 
 #define PROGRAM_NAME     "S44BGP.X"
 #define PROGRAM_VERSION  "0.2.0 (2023/03/19)"
 
 #define MAX_MUSIC (32)
 
-#define FREAD_BUFFER_LEN (65536 * 4)
+#define FREAD_BUFFER_LEN (44100 * 4)
+#define YM2608_DECODE_BUFFER_BYTES (44100 * 4 * 2)
 
 #define SJIS_ONPU "\x81\xf4"
 
@@ -25,8 +27,16 @@ static int16_t g_paused;
 static uint32_t g_pcm8pp_mode;
 static uint32_t g_int_counter;
 static int16_t g_quiet_mode;
+static uint32_t g_elapsed_time;
 
+//
+//  timer-D interrupt handler
+//
 static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
+
+  if (!g_paused) {
+    g_elapsed_time += 10;
+  }
 
   if (g_int_counter == 0) {
     if (B_SFTSNS() & 0x0002) {                // CTRL key
@@ -77,6 +87,9 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
 
 }
 
+//
+//  keep process checker
+//
 static uint8_t* check_keep_process(const uint8_t* exec_name) {
 
   uint8_t* psp = (uint8_t*)GETPDB() - 16;
@@ -114,8 +127,11 @@ static uint8_t* check_keep_process(const uint8_t* exec_name) {
   return NULL;
 }
 
+//
+//  show help message
+//
 static void show_help_message() {
-  printf("usage: s44bgp [options] <file1.s44> [<file2.s44> ...]\n");
+  printf("usage: s44bgp [options] <file1.(s44|a44)> [<file2.(s44|a44)> ...]\n");
   printf("options:\n");
   printf("   -r    ... remove s44bgp\n");
   printf("   -v<n> ... volume (1-15, default:8)\n");
@@ -126,6 +142,9 @@ static void show_help_message() {
   printf("   -h    ... show help message\n");
 }
 
+//
+//  main
+//
 int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // default exit code
@@ -145,6 +164,9 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // file read staging buffer
   int16_t* fread_buffer = NULL;
+
+  // ym2608 decode handle
+  YM2608_DECODE_HANDLE ym2608_decode = { 0 };
 
   // credit
   printf("S44BGP.X - 16bit linear PCM data background player version " PROGRAM_VERSION " by tantan\n");
@@ -191,17 +213,17 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         goto exit;
       }
       
-      uint8_t* s44_filename = argv[i];
-      if (strlen(s44_filename) < 5) {
+      uint8_t* pcm_filename = argv[i];
+      if (strlen(pcm_filename) < 5) {
         printf("error: invalid file name (%s).\n",argv[i]);
       }
       
-      uint8_t* s44_fileext = s44_filename + strlen(s44_filename) - 4;
-      if (stricmp(s44_fileext, ".s44") != 0) {
-        printf("error: not s44 format data file. (%s)\n", s44_filename);
+      uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
+      if (stricmp(pcm_fileext, ".s44") != 0 && stricmp(pcm_fileext, ".a44")) {
+        printf("error: not .s44/.a44 data file. (%s)\n", pcm_filename);
         goto exit;
       }
-      strcpy(g_music_name[ num_music++ ], s44_filename);
+      strcpy(g_music_name[ num_music++ ], pcm_filename);
     }
   }
 
@@ -217,7 +239,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       TIMERDST(0,0,0);
       MFREE((uint32_t)pdp);
       int32_t fnkmod = C_FNKMOD(-1);
-      C_FNKMOD(2);
+      //C_FNKMOD(2);
       C_FNKMOD(fnkmod);
       printf("removed " PROGRAM_NAME " successfully.\n");
       rc = 0;
@@ -258,30 +280,40 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     goto exit;
   }
 
+  // ym2608 decode handle
+  if (ym2608_decode_init(&ym2608_decode, YM2608_DECODE_BUFFER_BYTES, 44100, 2) != 0) {
+    printf("error: ym2608 decode buffer allocation error. (out of memory?)\n");
+    goto exit;
+  }
+
   // information
   printf(" PCM frequency: %d [Hz]\n", pcm_half_rate ? 22050 : 44100);
   printf(" PCM channels: %s\n", pcm_channels == 1 ? "mono" : "stereo");
   printf(" PCM bits: %d\n", pcm_half_bit ? 8 : 16);
   printf("\n");
 
-  // load s44 data to high memory
+  // load pcm data to high memory
   for (int16_t i = 0; i < num_music; i++) {
 
-    // open s44 file
-    uint8_t* s44_filename = g_music_name[i];
-    fp = fopen(s44_filename, "rb");
+    // open a pcm file
+    uint8_t* pcm_filename = g_music_name[i];
+    fp = fopen(pcm_filename, "rb");
     if (fp == NULL) {
-      printf("error: file open error. (%s)\n", s44_filename);
+      printf("error: file open error. (%s)\n", pcm_filename);
       goto exit;
     }
-    
+
+    // ym2608 adpcm format?
+    uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
+    int16_t ym2608 = stricmp(pcm_fileext, ".a44") == 0 ? 1 : 0;
+
     // check data length in 16bit unit
     fseek(fp, 0, SEEK_END);
     size_t data_len = ftell(fp) / sizeof(int16_t);
     fseek(fp, 0, SEEK_SET);
 
     // allocate high memory
-    size_t allocate_bytes = data_len * sizeof(int16_t) / (3 - pcm_channels) / (1 + pcm_half_rate) / (1 + pcm_half_bit);
+    size_t allocate_bytes = data_len * sizeof(int16_t) * (ym2608 ? 4 : 1) / (3 - pcm_channels) / (1 + pcm_half_rate) / (1 + pcm_half_bit);
     g_music_addr[i] = himem_malloc(allocate_bytes, 1);
     if (g_music_addr[i] == NULL) {
       printf("error: high memory allocation error. (out of memory?)\n");
@@ -289,130 +321,213 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     }
 
     // load data to high memory
-    if (pcm_channels == 2 && pcm_half_rate == 0 && pcm_half_bit == 0) {
+    if (!ym2608) {
 
-      // 16bit raw direct
+      // .s44
 
-      size_t read_len = 0;
-      do {
+      if (pcm_channels == 2 && pcm_half_rate == 0 && pcm_half_bit == 0) {
 
-        if (B_SFTSNS() & 0x01) {
-          printf("\r\nCanceled.\n");
-          goto exit;
-        }
+        // 16bit through
 
-        size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
-        if (len == 0) break;
+        size_t read_len = 0;
+        do {
 
-        memcpy(g_music_addr[i] + read_len, fread_buffer, len * sizeof(int16_t));
-        read_len += len;
+          if (B_SFTSNS() & 0x01) {
+            goto cancel;
+          }
 
-        printf("\rLoading %s into high memory... (%d/%d) [SHIFT] key to cancel.", s44_filename, read_len, data_len);
+          size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
+          if (len == 0) break;
 
-      } while (read_len < data_len);
+          memcpy(g_music_addr[i] + read_len, fread_buffer, len * sizeof(int16_t));
+          read_len += len;
 
-    } else if (pcm_half_bit == 0) {
+          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
 
-      // 16bit filtering
+        } while (read_len < data_len);
 
-      // stereo to mono and/or 44.1 to 22.05 down sampling
-      size_t read_len = 0;
-      int16_t down_sampling = 0;
-      int16_t* gma = g_music_addr[i];
-      do {
+      } else if (pcm_half_bit == 0) {
 
-        if (B_SFTSNS() & 0x01) {
-          printf("\r\nCanceled.\n");
-          goto exit;
-        }
+        // 16bit
 
-        size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
-        if (len == 0) break;
+        // stereo to mono and/or 44.1 to 22.05 down sampling
+        size_t read_len = 0;
+        uint32_t num_samples = 0;
+        int16_t* gma = g_music_addr[i];
+        do {
 
-        //printf("pcm_channels=%d, gma=%X, len=%d, read_len=%d, data_len=%d\n",pcm_channels,gma,len,read_len,data_len);
-        for (size_t j = 0; j < len/2; j++) {
+          if (B_SFTSNS() & 0x01) {
+            goto cancel;
+          }
 
-          // down sampling in half rate mode
-          if (pcm_half_rate) {
-            if (down_sampling) {
-              down_sampling = 0;
-              continue;
+          size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
+          if (len == 0) break;
+
+          for (size_t j = 0; j < len/2; j++) {
+
+            // down sampling in half rate mode
+            num_samples++;
+            if (pcm_half_rate && !(num_samples & 0x01)) continue;
+
+            if (pcm_channels == 1) {
+              // stereo to mono
+              gma[0] = ( fread_buffer[ j * 2 + 0 ] + fread_buffer[ j * 2 + 1 ] ) / 2;
+              gma++;
             } else {
-              down_sampling = 1;
+              // stereo
+              gma[0] = fread_buffer[ j * 2 + 0 ];
+              gma[1] = fread_buffer[ j * 2 + 1 ];
+              gma += 2;
             }
           }
 
-          if (pcm_channels == 1) {
-            // stereo to mono
-            gma[0] = ( fread_buffer[ j * 2 + 0 ] + fread_buffer[ j * 2 + 1 ] ) / 2;
-            gma++;
-          } else {
-            // stereo
-            gma[0] = fread_buffer[ j * 2 + 0 ];
-            gma[1] = fread_buffer[ j * 2 + 1 ];
-            gma += 2;
+          read_len += len;
+          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+
+        } while (read_len < data_len);
+
+      } else {
+
+        // 8bit
+
+        // stereo to mono and/or 44.1 to 22.05 down sampling
+        size_t read_len = 0;
+        uint32_t num_samples = 0;
+        int8_t* gma = (int8_t*)g_music_addr[i];
+        do {
+
+          if (B_SFTSNS() & 0x01) {
+            goto cancel;
           }
-        }
 
-        read_len += len;
-        printf("\rLoading %s into high memory... (%d/%d) [SHIFT] key to cancel.", s44_filename, read_len, data_len);
+          size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
+          if (len == 0) break;
 
-      } while (read_len < data_len);
+          for (size_t j = 0; j < len/2; j++) {
+
+            // down sampling in half rate mode
+            num_samples++;
+            if (pcm_half_rate && !(num_samples & 0x01)) continue;
+
+            if (pcm_channels == 1) {
+              // stereo to mono
+              gma[0] = ( fread_buffer[ j * 2 + 0 ] + fread_buffer[ j * 2 + 1 ] ) / 2 / 256;
+              gma++;
+            } else {
+              // stereo
+              gma[0] = fread_buffer[ j * 2 + 0 ] / 256;
+              gma[1] = fread_buffer[ j * 2 + 1 ] / 256;
+              gma += 2;
+            }
+          }
+
+          read_len += len;
+          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+
+        } while (read_len < data_len);
+
+      }
 
     } else {
 
-      // 8bit filtering
+      // .a44
 
-      // stereo to mono and/or 44.1 to 22.05 down sampling
-      size_t read_len = 0;
-      int16_t down_sampling = 0;
-      int8_t* gma = g_music_addr[i];
-      do {
+      if (pcm_half_bit == 0) {
 
-        if (B_SFTSNS() & 0x01) {
-          printf("\r\nCanceled.\n");
-          goto exit;
-        }
+        // 16bit
 
-        size_t len = fread(fread_buffer, sizeof(int16_t), FREAD_BUFFER_LEN, fp);
-        if (len == 0) break;
+        // stereo to mono and/or 44.1 to 22.05 down sampling
+        size_t read_len = 0;
+        uint32_t num_samples = 0;
+        int16_t* gma = g_music_addr[i];
+        do {
 
-        //printf("pcm_channels=%d, gma=%X, len=%d, read_len=%d, data_len=%d\n",pcm_channels,gma,len,read_len,data_len);
-        for (size_t j = 0; j < len/2; j++) {
+          if (B_SFTSNS() & 0x01) {
+            goto cancel;
+          }
 
-          // down sampling in half rate mode
-          if (pcm_half_rate) {
-            if (down_sampling) {
-              down_sampling = 0;
-              continue;
+          size_t len = fread(fread_buffer, sizeof(int16_t), YM2608_DECODE_BUFFER_BYTES / 4 / sizeof(int16_t), fp);
+          if (len == 0) break;
+
+          size_t decode_len = ym2608_decode_exec(&ym2608_decode, (uint8_t*)fread_buffer, len * sizeof(int16_t));
+
+          for (size_t j = 0; j < decode_len/2; j++) {
+
+            // down sampling in half rate mode
+            num_samples++;
+            if (pcm_half_rate && !(num_samples & 0x01)) continue;
+
+            int16_t* decode_buffer = ym2608_decode.decode_buffer;
+            if (pcm_channels == 1) {
+              // stereo to mono
+              gma[0] = ( decode_buffer[ j * 2 + 0 ] + decode_buffer[ j * 2 + 1 ] ) / 2;
+              gma++;
             } else {
-              down_sampling = 1;
+              // stereo
+              gma[0] = decode_buffer[ j * 2 + 0 ];
+              gma[1] = decode_buffer[ j * 2 + 1 ];
+              gma += 2;
             }
           }
 
-          if (pcm_channels == 1) {
-            // stereo to mono
-            gma[0] = ( fread_buffer[ j * 2 + 0 ] + fread_buffer[ j * 2 + 1 ] ) / 2 / 256;
-            gma++;
-          } else {
-            // stereo
-            gma[0] = fread_buffer[ j * 2 + 0 ] / 256;
-            gma[1] = fread_buffer[ j * 2 + 1 ] / 256;
-            gma += 2;
+          read_len += len;
+          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+
+        } while (read_len < data_len);
+
+      } else {
+
+        // 8bit
+
+        // stereo to mono and/or 44.1 to 22.05 down sampling
+        size_t read_len = 0;
+        uint32_t num_samples = 0;
+        int8_t* gma = (int8_t*)g_music_addr[i];
+        do {
+
+          if (B_SFTSNS() & 0x01) {
+            goto cancel;
           }
-        }
 
-        read_len += len;
-        printf("\rLoading %s into high memory... (%d/%d) [SHIFT] key to cancel.", s44_filename, read_len, data_len);
+          size_t len = fread(fread_buffer, sizeof(int16_t), YM2608_DECODE_BUFFER_BYTES / 4 / sizeof(int16_t), fp);
+          if (len == 0) break;
 
-      } while (read_len < data_len);
+          size_t decode_len = ym2608_decode_exec(&ym2608_decode, (uint8_t*)fread_buffer, len * sizeof(int16_t));
+
+          for (size_t j = 0; j < decode_len/2; j++) {
+
+            // down sampling in half rate mode
+            num_samples++;
+            if (pcm_half_rate && !(num_samples & 0x01)) continue;
+
+            int16_t* decode_buffer = ym2608_decode.decode_buffer;
+            if (pcm_channels == 1) {
+              // stereo to mono
+              gma[0] = ( decode_buffer[ j * 2 + 0 ] + decode_buffer[ j * 2 + 1 ] ) / 2 / 256;
+              gma++;
+            } else {
+              // stereo
+              gma[0] = decode_buffer[ j * 2 + 0 ] / 256;
+              gma[1] = decode_buffer[ j * 2 + 1 ] / 256;
+              gma += 2;
+            }
+          }
+
+          read_len += len;
+          printf("\rLoading %s ... (%d/%d) [SHIFT] key to cancel.", pcm_filename, read_len, data_len);
+
+        } while (read_len < data_len);
+
+      }
 
     }
 
     fclose(fp);
     fp = NULL;
+
     g_music_size[i] = allocate_bytes;
-    printf("\rLoaded %s into high memory.\x1b[K\n", s44_filename);
+
+    printf("\rLoaded %s into high memory.\x1b[K\n", pcm_filename);
   
   }
 
@@ -422,12 +537,16 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     fread_buffer = NULL;
   }
 
+  // close ym2608 decode handle
+  ym2608_decode_close(&ym2608_decode);
+
   // global counters
   g_num_music = num_music;
   g_current_music = 0;
   g_paused = 0;
   g_int_counter = 0;
   g_quiet_mode = quiet_mode;
+  g_elapsed_time = 0;
 
   // pcm8pp parameters
   int16_t pcm8pp_volume = pcm_volume;
@@ -456,7 +575,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     B_PUTMES(6, 2, 31, 46, g_music_name[ g_current_music ]);
   }
 
-  printf(PROGRAM_NAME " background service started. [CTRL]+[XF4] to pause. [CTRL]+[XF5] to skip.\n");
+  printf("\n" PROGRAM_NAME " background playback service started. [CTRL]+[XF4] to pause. [CTRL]+[XF5] to skip.\n");
 
   rc = 0;
 
@@ -465,13 +584,18 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 //  extern unsigned int _PSP;
   KEEPPR(_HEND - _PSP - 0xf0, rc);
 
+cancel:
+  printf("\r\nCanceled.\n");
+
 exit:
 
+  // close file handle if opened
   if (fp != NULL) {
     fclose(fp);
     fp = NULL;
   }
 
+  // reclaim high memory buffers if opened
   for (int16_t i = 0; i < MAX_MUSIC; i++) {
     if (g_music_addr[i] != NULL) {
       himem_free(g_music_addr[i], 1);
@@ -479,10 +603,14 @@ exit:
     }
   }
 
+  // reclaim file read buffer if opened
   if (fread_buffer != NULL) {
     himem_free(fread_buffer, 0);
     fread_buffer = NULL;
   }
+
+  // close ym2608 decoder handle
+  ym2608_decode_close(&ym2608_decode);
 
   return rc;
 }
