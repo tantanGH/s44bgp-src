@@ -394,7 +394,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   printf("PCM frequency: %d [Hz]\n", pcm_half_rate ? 22050 : 44100);
   printf("PCM channels: %s\n", pcm_channels == 1 ? "mono" : "stereo");
   printf("PCM bits: %d\n", pcm_half_bit ? 8 : 16);
-  printf("\n");
+  printf("--\n");
   printf("Available high memory: %d [KB]\n", himem_getsize(1) / 1024);
 
   // load pcm data to high memory
@@ -702,7 +702,8 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     }
   }
 
-  printf("\n" PROGRAM_NAME " background playback service started. [CTRL]+[XF4] to pause. [CTRL]+[XF5] to skip.\n");
+  printf("--\n");
+  printf(PROGRAM_NAME " background playback service started. [CTRL]+[XF4] to pause. [CTRL]+[XF5] to skip.\n");
 
   rc = 0;
 
