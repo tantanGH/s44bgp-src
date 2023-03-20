@@ -105,7 +105,7 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
         if (event->start_msec <= 500) {      // do not show first 0.5 sec KMD events to ensure file name display
           kmd->current_event_ofs++;
         } else if (event->start_msec <= g_elapsed_time) {
-          B_PUTMES(6, event->pos_x * 2, 31, MAX_DISP_LEN, event->message);
+          B_PUTMES(6, event->pos_x * 2, 31, MAX_DISP_LEN - event->pos_x * 2, event->message);
           kmd->current_event_ofs++;
         }
       }
@@ -327,9 +327,11 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         if (memcmp(check_addr, EYE_CATCH, EYE_CATCH_LEN) == 0) {
           //printf("found eye catch at %X\n", check_addr);
           uint32_t himem_addr = B_LPEEK((uint32_t*)(check_addr + EYE_CATCH_LEN));
-          himem_free((void*)himem_addr, 1);
+          if (himem_addr != 0) {
+            himem_free((void*)himem_addr, 1);
+          }
         }
-        check_addr += 4;
+        check_addr += 2;
       }
 
       // release program memory itself
