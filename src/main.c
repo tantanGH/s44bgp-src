@@ -323,6 +323,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       // release allocated high memory buffers
       uint8_t* mem_end = (uint8_t*)B_LPEEK((uint32_t*)(pdp - 8));
       uint8_t* check_addr = (uint8_t*)(pdp + 256);
+      int16_t num_free = 0;
       while (check_addr < mem_end) {
         if (memcmp(check_addr, EYE_CATCH, EYE_CATCH_LEN) == 0) {
           //printf("found eye catch at %X\n", check_addr);
@@ -330,8 +331,10 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
           if (himem_addr != 0) {
             himem_free((void*)himem_addr, 1);
           }
+          num_free++;
         }
         check_addr += 2;
+        if (num_free >= MAX_MUSIC) break;
       }
 
       // release program memory itself
