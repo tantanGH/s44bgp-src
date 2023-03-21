@@ -98,15 +98,16 @@ int32_t pcm8pp_play_ex_linked_array_chain(int16_t channel, uint32_t mode, uint32
 
   return reg_d0;
 }
+*/
 
 //
 //  set channel mode ($007x)
 //
-int32_t pcm8pp_set_channel_mode(int16_t channel, uint32_t mode, uint32_t freq) {
+int32_t pcm8pp_set_channel_mode(int16_t channel, uint32_t mode) {
 
   register uint32_t reg_d0 asm ("d0") = 0x0070 + channel;
   register uint32_t reg_d1 asm ("d1") = mode;
-  register uint32_t reg_d3 asm ("d3") = freq;
+  register uint32_t reg_d3 asm ("d3") = -1;   // we do not change frequency
 
   asm volatile (
     "trap #2\n"         // trap #2
@@ -118,7 +119,7 @@ int32_t pcm8pp_set_channel_mode(int16_t channel, uint32_t mode, uint32_t freq) {
 
   return reg_d0;
 }
-*/
+
 
 //
 //  get data length ($008x)
