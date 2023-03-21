@@ -14,8 +14,8 @@ static PCM_MUSIC g_pcm_music[ MAX_MUSIC ];
 static int16_t g_num_music;
 static int16_t g_quiet_mode;
 static int16_t g_shuffle_mode;
-static uint32_t g_pcm8pp_mode;
 
+volatile static uint32_t g_pcm8pp_mode;
 volatile static int16_t g_current_music;
 volatile static int16_t g_paused;
 volatile static int32_t g_int_counter;
@@ -33,11 +33,11 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
 
   // check playback stop
   if (g_int_counter == 8) {
-    if (!g_paused && pcm8pp_get_data_length(0) == 0) {
+    if (!g_paused && pcm8pp_get_data_length(PCM8PP_CHANNEL) == 0) {
       g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
       PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
       pcm->kmd.current_event_ofs = 0;
-      pcm8pp_play(0, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
+      pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
       if (!g_quiet_mode) {
         B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
         if (pcm->kmd.tag_title[0] != '\0') {
@@ -53,9 +53,13 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
 
   // check pause/resume
   if (g_int_counter == 5) {
-    if (B_SFTSNS() & 0x02) {                  // CTRL key
-      int32_t sense_code = BITSNS(0x0b);
-      if (sense_code & 0x01) {                // CTRL + XF4 (pause/resume)
+    uint8_t key1 = *((uint8_t*)0x80e);      // CTRL key
+    uint8_t key2 = *((uint8_t*)0x80b);      // XF4/XF5 key
+//    if (B_SFTSNS() & 0x02) {                  // CTRL key
+    if (key1 & 0x02) {
+//      int32_t sense_code = BITSNS(0x0b);
+//      if (sense_code & 0x01) {                // CTRL + XF4 (pause/resume)
+      if (key2 & 0x01) {                    // XF4
         if (g_paused) {
           pcm8pp_resume();
           if (!g_quiet_mode) {
@@ -75,12 +79,13 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
           }
           g_paused = 1;
         }
-      } else if (sense_code & 0x02) {         // CTRL + XF5 (skip)
+//      } else if (sense_code & 0x02) {         // CTRL + XF5 (skip)
+      } else if (key2 & 0x02) {         // XF5
         pcm8pp_stop();
         g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
         PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
         pcm->kmd.current_event_ofs = 0;
-        pcm8pp_play(0, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
+        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
         if (!g_quiet_mode) {
           B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
           if (pcm->kmd.tag_title[0] != '\0') {
@@ -94,6 +99,35 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
       }
     }
   }
+
+/*
+  // check volume up/down
+  if (g_int_counter == 4) {
+    if (B_SFTSNS() & 0x01) {                  // SHIFT key
+      int32_t sense_code = BITSNS(0x0b);
+      if (sense_code & 0x01) {                // SHIFT + XF4 (volume down)
+//      g_pcm8pp_mode = ( pcm8pp_volume << 16 ) | ( pcm8pp_freq << 8 ) | pcm8pp_pan;
+        uint32_t current_volume = (g_pcm8pp_mode & 0x000f0000);
+        if (current_volume > 0x00030000) {
+          g_pcm8pp_mode = (current_volume - 0x00010000) | (g_pcm8pp_mode & 0x0000ffff);
+          pcm8pp_set_channel_mode(PCM8PP_CHANNEL, g_pcm8pp_mode);
+          if (!g_quiet_mode) {
+            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "VOLUME DOWN");
+          }
+        }
+      } else if (sense_code & 0x02) {         // SHIFT + XF5 (volume up)
+        uint32_t current_volume = (g_pcm8pp_mode & 0x000f0000);
+        if (current_volume < 0x000a0000) {
+          g_pcm8pp_mode = (current_volume + 0x00010000) | (g_pcm8pp_mode & 0x0000ffff);
+          pcm8pp_set_channel_mode(PCM8PP_CHANNEL, g_pcm8pp_mode);
+          if (!g_quiet_mode) {
+            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "VOLUME UP");
+          }
+        }
+      }
+    }
+  }
+*/
 
   // check KMD event
   if (g_int_counter == 3) {
@@ -165,7 +199,7 @@ static void show_help_message() {
   printf("\n");
   printf("   -i <file> ... indirect file\n");
   printf("\n");
-  printf("   -v<n> ... volume (1-15, default:8)\n");
+  printf("   -v<n> ... volume (1-12, default:8)\n");
   printf("   -s    ... shuffle mode\n");
   printf("   -q    ... quiet mode\n");
   printf("\n");
@@ -221,7 +255,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     if (argv[i][0] == '-' && strlen(argv[i]) >= 2) {
       if (argv[i][1] == 'v') {
         pcm_volume = atoi(argv[i]+2);
-        if (pcm_volume < 1 || pcm_volume > 15 || strlen(argv[i]) < 3) {
+        if (pcm_volume < 1 || pcm_volume > 12 || strlen(argv[i]) < 3) {
           show_help_message();
           goto exit;
         }
@@ -695,7 +729,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // start pcm8pp play
   PCM_MUSIC* current_pcm = &(g_pcm_music[ g_current_music ]);
-  pcm8pp_play(0, g_pcm8pp_mode, current_pcm->buffer_bytes, 44100*256, current_pcm->buffer);
+  pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, current_pcm->buffer_bytes, 44100*256, current_pcm->buffer);
   if (!quiet_mode) {
     B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
     if (current_pcm->kmd.tag_title[0] != '\0') {
