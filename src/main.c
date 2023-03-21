@@ -34,32 +34,46 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
   // check playback stop
   if (g_int_counter == 8) {
     if (!g_paused && pcm8pp_get_data_length(PCM8PP_CHANNEL) == 0) {
-      g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
-      PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
-      pcm->kmd.current_event_ofs = 0;
-      pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
-      if (!g_quiet_mode) {
-        B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
-        if (pcm->kmd.tag_title[0] != '\0') {
-          B_PUTMES(6, 2, 31, 64, pcm->kmd.tag_title);
-        } else {
-          B_PUTMES(6, 2, 31, 64, pcm->file_name);
+      // really ended?
+      if (g_elapsed_time < g_pcm_music[ g_current_music ].total_time_msec - 1500) {
+        // probablly pcm8pp playback was stopped externally
+//        PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
+//        uint32_t resume_ofs = (uint32_t)((float)pcm->buffer_bytes * (float)g_elapsed_time / (float)pcm->total_time_msec) & 0xfffffffc;
+//        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes - resume_ofs, 44100*256, pcm->buffer + resume_ofs);
+        pcm8pp_pause();
+        g_paused = 1;
+        if (!g_quiet_mode) {
+          B_PUTMES(6, 0, 31, 66, SJIS_ONPU "ABORTED.");
         }
+      } else {
+        // next music
+        g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
+        PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
+        pcm->kmd.current_event_ofs = 0;
+        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
+        if (!g_quiet_mode) {
+          B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
+          if (pcm->kmd.tag_title[0] != '\0') {
+            B_PUTMES(6, 2, 31, 64, pcm->kmd.tag_title);
+          } else {
+            B_PUTMES(6, 2, 31, 64, pcm->file_name);
+          }
+        }
+        g_paused = 0;
+        g_elapsed_time = 0;
       }
-      g_paused = 0;
-      g_elapsed_time = 0;
     }
   }
 
   // check pause/resume
   if (g_int_counter == 5) {
-    uint8_t key1 = *((uint8_t*)0x80e);      // CTRL key
-    uint8_t key2 = *((uint8_t*)0x80b);      // XF4/XF5 key
-//    if (B_SFTSNS() & 0x02) {                  // CTRL key
-    if (key1 & 0x02) {
-//      int32_t sense_code = BITSNS(0x0b);
-//      if (sense_code & 0x01) {                // CTRL + XF4 (pause/resume)
-      if (key2 & 0x01) {                    // XF4
+//    uint8_t key1 = *((uint8_t*)0x80e);      // CTRL key
+//    uint8_t key2 = *((uint8_t*)0x80b);      // XF4/XF5 key
+    if (B_SFTSNS() & 0x02) {                  // CTRL key
+//    if (key1 & 0x02) {
+      int32_t sense_code = BITSNS(0x0b);
+      if (sense_code & 0x01) {                // CTRL + XF4 (pause/resume)
+//      if (key2 & 0x01) {                    // XF4
         if (g_paused) {
           pcm8pp_resume();
           if (!g_quiet_mode) {
@@ -75,12 +89,12 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
         } else {
           pcm8pp_pause();
           if (!g_quiet_mode) {
-            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "PAUSED");
+            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "PAUSED.");
           }
           g_paused = 1;
         }
-//      } else if (sense_code & 0x02) {         // CTRL + XF5 (skip)
-      } else if (key2 & 0x02) {         // XF5
+      } else if (sense_code & 0x02) {         // CTRL + XF5 (skip)
+//      } else if (key2 & 0x02) {         // XF5
         pcm8pp_stop();
         g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
         PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
@@ -99,35 +113,6 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
       }
     }
   }
-
-/*
-  // check volume up/down
-  if (g_int_counter == 4) {
-    if (B_SFTSNS() & 0x01) {                  // SHIFT key
-      int32_t sense_code = BITSNS(0x0b);
-      if (sense_code & 0x01) {                // SHIFT + XF4 (volume down)
-//      g_pcm8pp_mode = ( pcm8pp_volume << 16 ) | ( pcm8pp_freq << 8 ) | pcm8pp_pan;
-        uint32_t current_volume = (g_pcm8pp_mode & 0x000f0000);
-        if (current_volume > 0x00030000) {
-          g_pcm8pp_mode = (current_volume - 0x00010000) | (g_pcm8pp_mode & 0x0000ffff);
-          pcm8pp_set_channel_mode(PCM8PP_CHANNEL, g_pcm8pp_mode);
-          if (!g_quiet_mode) {
-            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "VOLUME DOWN");
-          }
-        }
-      } else if (sense_code & 0x02) {         // SHIFT + XF5 (volume up)
-        uint32_t current_volume = (g_pcm8pp_mode & 0x000f0000);
-        if (current_volume < 0x000a0000) {
-          g_pcm8pp_mode = (current_volume + 0x00010000) | (g_pcm8pp_mode & 0x0000ffff);
-          pcm8pp_set_channel_mode(PCM8PP_CHANNEL, g_pcm8pp_mode);
-          if (!g_quiet_mode) {
-            B_PUTMES(6, 0, 31, MAX_DISP_LEN, SJIS_ONPU "VOLUME UP");
-          }
-        }
-      }
-    }
-  }
-*/
 
   // check KMD event
   if (g_int_counter == 3) {
@@ -477,6 +462,9 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       goto exit;
     }
 
+    // total music time
+    pcm->total_time_msec = data_len * 1000 * (ym2608 ? 4 : 1 ) / 44100 / 2;
+
     // load data to high memory
     if (!ym2608) {
 
@@ -684,7 +672,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
     pcm->buffer_bytes = allocate_bytes;
 
-    printf("\rLoaded %s into high memory.\x1b[K\n", pcm_filename);
+    printf("\rLoaded %s (%3.1fsec) into high memory.\x1b[K\n", pcm_filename, pcm->total_time_msec / 1000.0);
     printf("Available high memory: %d [KB]\n", himem_getsize(1) / 1024);
   
   }
