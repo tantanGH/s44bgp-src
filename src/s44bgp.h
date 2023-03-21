@@ -3,7 +3,7 @@
 #include "kmd.h"
 
 #define PROGRAM_NAME     "S44BGP.X"
-#define PROGRAM_VERSION  "0.3.2 (2023/03/21)"
+#define PROGRAM_VERSION  "0.3.3 (2023/03/22)"
 
 #define EYE_CATCH "Bgp#44pM"
 #define EYE_CATCH_LEN (8)
@@ -24,6 +24,7 @@ typedef struct {
   uint8_t eye_catch[ EYE_CATCH_LEN ];
   int16_t* buffer;
   uint32_t buffer_bytes;
+  int16_t volume;
   uint32_t total_time_msec;
   uint8_t file_name[ 256 ];
   KMD_HANDLE kmd;

@@ -15,7 +15,7 @@ static int16_t g_num_music;
 static int16_t g_quiet_mode;
 static int16_t g_shuffle_mode;
 
-volatile static uint32_t g_pcm8pp_mode;
+volatile static uint32_t g_pcm8pp_freq;
 volatile static int16_t g_current_music;
 volatile static int16_t g_paused;
 volatile static int32_t g_int_counter;
@@ -38,7 +38,7 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
       if (g_elapsed_time < g_pcm_music[ g_current_music ].total_time_msec - 1500) {
         // probablly pcm8pp playback was stopped externally
 //        PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
-//        uint32_t resume_ofs = (uint32_t)((float)pcm->buffer_bytes * (float)g_elapsed_time / (float)pcm->total_time_msec) & 0xfffffffc;
+//        uint32_t resume_ofs = (uint32_t)((float)pcm->buffer_bytes * (float)g_elapsed_time / (float)pcm->total_time_msec / 2) & 0xfffffffc;
 //        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes - resume_ofs, 44100*256, pcm->buffer + resume_ofs);
         pcm8pp_pause();
         g_paused = 1;
@@ -50,7 +50,7 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
         g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
         PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
         pcm->kmd.current_event_ofs = 0;
-        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
+        pcm8pp_play(PCM8PP_CHANNEL, ( pcm->volume << 16 ) | ( g_pcm8pp_freq << 8 ) | 0x03, pcm->buffer_bytes, 44100*256, pcm->buffer);
         if (!g_quiet_mode) {
           B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
           if (pcm->kmd.tag_title[0] != '\0') {
@@ -99,7 +99,7 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
         g_current_music = g_shuffle_mode ? rand() % g_num_music : (g_current_music + 1) % g_num_music;
         PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
         pcm->kmd.current_event_ofs = 0;
-        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes, 44100*256, pcm->buffer);
+        pcm8pp_play(PCM8PP_CHANNEL, ( pcm->volume << 16 ) | ( g_pcm8pp_freq << 8 ) | 0x03, pcm->buffer_bytes, 44100*256, pcm->buffer);
         if (!g_quiet_mode) {
           B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
           if (pcm->kmd.tag_title[0] != '\0') {
@@ -264,13 +264,11 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         if (fp != NULL) {
 
           static uint8_t line[ MAX_PATH_LEN + 1 ];
-
           while (fgets(line, MAX_PATH_LEN, fp) != NULL) {
 
             for (int16_t i = 0; i < MAX_PATH_LEN; i++) {
               if (line[i] <= ' ') {
                 line[i] = '\0';
-                break;
               }
             }
 
@@ -280,14 +278,28 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
               printf("error: too many music.\n");
               goto exit;
             }
-      
+ 
+            int16_t volume = pcm_volume;
+            for (int16_t i = 0; i < MAX_PATH_LEN; i++) {
+              if (line[i] == ',') {
+                if (i+2 < MAX_PATH_LEN && line[i+1] == 'v') {
+                  int16_t v = atoi(line+i+2);
+                  if (v >= 1 && v <= 12) volume = v;
+                }
+                line[i] = '\0';
+                break;
+              }
+            }
+     
             uint8_t* pcm_filename = line;
             uint8_t* pcm_fileext = pcm_filename + strlen(pcm_filename) - 4;
             if (stricmp(pcm_fileext, ".s44") != 0 && stricmp(pcm_fileext, ".a44")) {
               printf("error: not .s44/.a44 data file. (%s)\n", pcm_filename);
               goto exit;
             }
-            strcpy(g_pcm_music[ num_music++ ].file_name, pcm_filename);
+            strcpy(g_pcm_music[ num_music ].file_name, pcm_filename);
+            g_pcm_music[ num_music ].volume = volume;
+            num_music++;
 
           }
 
@@ -320,7 +332,9 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
         printf("error: not .s44/.a44 data file. (%s)\n", pcm_filename);
         goto exit;
       }
-      strcpy(g_pcm_music[ num_music++ ].file_name, pcm_filename);
+      strcpy(g_pcm_music[ num_music ].file_name, pcm_filename);
+      g_pcm_music[ num_music ].volume = pcm_volume;
+      num_music++;
     }
   }
 
@@ -463,7 +477,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
     }
 
     // total music time
-    pcm->total_time_msec = data_len * 1000 * (ym2608 ? 4 : 1 ) / 44100 / 2;
+    pcm->total_time_msec = (uint32_t)(data_len * 1000.0 * (ym2608 ? 4 : 1 ) / 44100.0 / 2.0);
 
     // load data to high memory
     if (!ym2608) {
@@ -694,20 +708,14 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   g_elapsed_time = 0;
   g_current_music = g_shuffle_mode ? rand() % g_num_music : 0;
   g_int_counter = TIMERD_COUNT_INTERVAL;
-
-  // pcm8pp parameters
-  int16_t pcm8pp_volume = pcm_volume;
-  int16_t pcm8pp_pan = 0x03;
-  int16_t pcm8pp_freq = pcm_channels == 1 && pcm_half_bit == 0 && pcm_half_rate == 0 ? 0x0d :
-                        pcm_channels == 1 && pcm_half_bit == 0 && pcm_half_rate == 1 ? 0x0a :
-                        pcm_channels == 1 && pcm_half_bit == 1 && pcm_half_rate == 0 ? 0x15 :
-                        pcm_channels == 1 && pcm_half_bit == 1 && pcm_half_rate == 1 ? 0x12 :
-                        pcm_channels == 2 && pcm_half_bit == 0 && pcm_half_rate == 0 ? 0x1d : 
-                        pcm_channels == 2 && pcm_half_bit == 0 && pcm_half_rate == 1 ? 0x1a :
-                        pcm_channels == 2 && pcm_half_bit == 1 && pcm_half_rate == 0 ? 0x25 :
-                        pcm_channels == 2 && pcm_half_bit == 1 && pcm_half_rate == 1 ? 0x22 : 0x1d;                      
-
-  g_pcm8pp_mode = ( pcm8pp_volume << 16 ) | ( pcm8pp_freq << 8 ) | pcm8pp_pan;
+  g_pcm8pp_freq = pcm_channels == 1 && pcm_half_bit == 0 && pcm_half_rate == 0 ? 0x0d :
+                  pcm_channels == 1 && pcm_half_bit == 0 && pcm_half_rate == 1 ? 0x0a :
+                  pcm_channels == 1 && pcm_half_bit == 1 && pcm_half_rate == 0 ? 0x15 :
+                  pcm_channels == 1 && pcm_half_bit == 1 && pcm_half_rate == 1 ? 0x12 :
+                  pcm_channels == 2 && pcm_half_bit == 0 && pcm_half_rate == 0 ? 0x1d : 
+                  pcm_channels == 2 && pcm_half_bit == 0 && pcm_half_rate == 1 ? 0x1a :
+                  pcm_channels == 2 && pcm_half_bit == 1 && pcm_half_rate == 0 ? 0x25 :
+                  pcm_channels == 2 && pcm_half_bit == 1 && pcm_half_rate == 1 ? 0x22 : 0x1d;                      
 
   // set timer-D interrupt handler
   if (TIMERDST((uint8_t*)(__timer_d_interrupt_handler__), 7, 200) != 0) {
@@ -717,7 +725,7 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
 
   // start pcm8pp play
   PCM_MUSIC* current_pcm = &(g_pcm_music[ g_current_music ]);
-  pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, current_pcm->buffer_bytes, 44100*256, current_pcm->buffer);
+  pcm8pp_play(PCM8PP_CHANNEL, ( current_pcm->volume << 16 ) | ( g_pcm8pp_freq << 8 ) | 0x03, current_pcm->buffer_bytes, 44100*256, current_pcm->buffer);
   if (!quiet_mode) {
     B_PUTMES(6, 0, 31, 2, SJIS_ONPU);
     if (current_pcm->kmd.tag_title[0] != '\0') {
