@@ -10,10 +10,13 @@
 #include "kmd.h"
 #include "s44bgp.h"
 
+#define __OPM_TIMER__
+
 static PCM_MUSIC g_pcm_music[ MAX_MUSIC ];
 static int16_t g_num_music;
 static int16_t g_quiet_mode;
 static int16_t g_shuffle_mode;
+static int16_t g_opm_timer;
 
 volatile static uint32_t g_pcm8pp_freq;
 volatile static int16_t g_current_music;
@@ -21,15 +24,27 @@ volatile static int16_t g_paused;
 volatile static int32_t g_int_counter;
 volatile static uint32_t g_elapsed_time;
 
+#define OPM_REG_PORT  ((uint8_t*)0xE90001)
+#define OPM_DATA_PORT ((uint8_t*)0xE90003)
+
 //
-//  timer-D interrupt handler
+//  timer-D / OPM timer-B interrupt handler
 //
-static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
+static void __attribute__((interrupt)) __timer_interrupt_handler__(void) {
 
   // total play time
   if (!g_paused) {
-    g_elapsed_time += 10;
+#ifdef __OPM_TIMER__
+    g_elapsed_time += OPM_INTERVAL_MSEC;
+#else
+    g_elapsed_time += TIMERD_INTERVAL_MSEC;
+#endif
   }
+
+#ifdef __OPM_TIMER__
+  while (OPMSNS() & 0x80);
+  OPMSET(0x14, 0x2a);
+#endif
 
   // check playback stop
   if (g_int_counter == 8) {
@@ -66,7 +81,11 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
   }
 
   // check pause/resume
-  if (g_int_counter == 5) {
+#ifdef __OPM_TIMER__
+  if (g_int_counter & 0x01) {
+#else
+  if (g_int_counter == 4) {
+#endif
 //    uint8_t key1 = *((uint8_t*)0x80e);      // CTRL key
 //    uint8_t key2 = *((uint8_t*)0x80b);      // XF4/XF5 key
     if (B_SFTSNS() & 0x02) {                  // CTRL key
@@ -115,7 +134,11 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
   }
 
   // check KMD event
-  if (g_int_counter == 3) {
+#ifdef __OPM_TIMER__
+  if (1) {
+#else
+  if (g_int_counter == 2) {
+#endif
     if (!g_quiet_mode) {
       PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
       KMD_HANDLE* kmd = &(pcm->kmd);
@@ -134,7 +157,11 @@ static void __attribute__((interrupt)) __timer_d_interrupt_handler__(void) {
   // countdown
   g_int_counter--;
   if (g_int_counter < 0) {
-    g_int_counter = TIMERD_COUNT_INTERVAL;
+#ifdef __OPM_TIMER__
+    g_int_counter = OPM_INTERVAL_COUNT;
+#else
+    g_int_counter = TIMERD_INTERVAL_COUNT;
+#endif
   }
 
 }
@@ -350,8 +377,15 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
       pcm8pp_pause();
       pcm8pp_stop();
 
+#ifdef __OPM_TIMER__
+      // release OPM timer-B interrupt handle
+      while (OPMSNS() & 0x80);
+      OPMSET(0x14, 0x00);
+      OPMINTST(0);
+#else
       // release timer-D interrupt handle
       TIMERDST(0,0,0);
+#endif
 
       // release allocated high memory buffers
       uint8_t* mem_end = (uint8_t*)B_LPEEK((uint32_t*)(pdp - 8));
@@ -707,7 +741,11 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
   g_paused = 0;
   g_elapsed_time = 0;
   g_current_music = g_shuffle_mode ? rand() % g_num_music : 0;
-  g_int_counter = TIMERD_COUNT_INTERVAL;
+#ifdef __OPM_TIMER__
+  g_int_counter = OPM_INTERVAL_COUNT;
+#else
+  g_int_counter = TIMERD_INTERVAL_COUNT;
+#endif
   g_pcm8pp_freq = pcm_channels == 1 && pcm_half_bit == 0 && pcm_half_rate == 0 ? 0x0d :
                   pcm_channels == 1 && pcm_half_bit == 0 && pcm_half_rate == 1 ? 0x0a :
                   pcm_channels == 1 && pcm_half_bit == 1 && pcm_half_rate == 0 ? 0x15 :
@@ -717,11 +755,36 @@ int32_t main(int32_t argc, uint8_t* argv[]) {
                   pcm_channels == 2 && pcm_half_bit == 1 && pcm_half_rate == 0 ? 0x25 :
                   pcm_channels == 2 && pcm_half_bit == 1 && pcm_half_rate == 1 ? 0x22 : 0x1d;                      
 
-  // set timer-D interrupt handler
-  if (TIMERDST((uint8_t*)(__timer_d_interrupt_handler__), 7, 200) != 0) {
-    printf("error: timer-D interrupt is being used by other applications. (CONFIG.SYS PROCESS= ?)\r\n");
+#ifdef __OPM_TIMER__
+  // $14:OPM Timer Control
+  // disable timer-A/B count and interrupt
+  while (OPMSNS() & 0x80);
+  OPMSET(0x14, 0x00);
+
+  // set OPM timer-B interrupt handler
+  if (OPMINTST((uint8_t*)(__timer_interrupt_handler__)) != 0) {
+    printf("error: opm interrupt is being used by other applications. (any FM driver?)\n");
     goto exit;
   }
+
+  // $12:CLKB
+  // CLKB=6   ... Tb(ms) = 1024 * (256 -   6) / 4000 = 64ms
+  // CLKB=131 ... Tb(ms) = 1024 * (256 - 131) / 4000 = 32ms
+  while (OPMSNS() & 0x80);
+//  OPMSET(0x12, 131);
+  OPMSET(0x12, 6);
+
+  // $14:OPM Timer Control
+  // bit5:timer-B overflow reset bit3:timer-B interrupt enable, bit1:timer-B start
+  while (OPMSNS() & 0x80);
+  OPMSET(0x14, 0x2a);
+#else
+  // set timer-D interrupt handler
+  if (TIMERDST((uint8_t*)(__timer_interrupt_handler__), 7, 200) != 0) {
+    printf("error: timer-D interrupt is being used by other applications. (CONFIG.SYS PROCESS= ?)\n");
+    goto exit;
+  }
+#endif
 
   // start pcm8pp play
   PCM_MUSIC* current_pcm = &(g_pcm_music[ g_current_music ]);
