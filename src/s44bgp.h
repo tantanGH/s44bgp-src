@@ -3,7 +3,7 @@
 #include "kmd.h"
 
 #define PROGRAM_NAME     "S44BGP.X"
-#define PROGRAM_VERSION  "0.3.3 (2023/03/22)"
+#define PROGRAM_VERSION  "0.4.0 (2023/03/23)"
 
 #define EYE_CATCH "Bgp#44pM"
 #define EYE_CATCH_LEN (8)
@@ -16,7 +16,12 @@
 #define YM2608_DECODE_BUFFER_BYTES (44100 * 4 * 2)
 
 #define PCM8PP_CHANNEL (1)
-#define TIMERD_COUNT_INTERVAL (16)
+
+#define TIMERD_INTERVAL_MSEC  (10)
+#define TIMERD_INTERVAL_COUNT (16)
+
+#define OPM_INTERVAL_MSEC  (64)
+#define OPM_INTERVAL_COUNT (10)
 
 #define SJIS_ONPU "\x81\xf4"
 
