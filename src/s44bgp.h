@@ -3,7 +3,7 @@
 #include "kmd.h"
 
 #define PROGRAM_NAME     "S44BGP.X"
-#define PROGRAM_VERSION  "0.4.0 (2023/03/23)"
+#define PROGRAM_VERSION  "0.4.1 (2023/03/24)"
 
 #define EYE_CATCH "Bgp#44pM"
 #define EYE_CATCH_LEN (8)

@@ -52,13 +52,10 @@ static void __attribute__((interrupt)) __timer_interrupt_handler__(void) {
       // really ended?
       if (g_elapsed_time < g_pcm_music[ g_current_music ].total_time_msec - 1500) {
         // probablly pcm8pp playback was stopped externally
-//        PCM_MUSIC* pcm = &(g_pcm_music[ g_current_music ]);
-//        uint32_t resume_ofs = (uint32_t)((float)pcm->buffer_bytes * (float)g_elapsed_time / (float)pcm->total_time_msec / 2) & 0xfffffffc;
-//        pcm8pp_play(PCM8PP_CHANNEL, g_pcm8pp_mode, pcm->buffer_bytes - resume_ofs, 44100*256, pcm->buffer + resume_ofs);
-        pcm8pp_pause();
+//        pcm8pp_pause();
         g_paused = 1;
         if (!g_quiet_mode) {
-          B_PUTMES(6, 0, 31, 66, SJIS_ONPU "ABORTED.");
+          B_PUTMES(6, 0, 31, 66, SJIS_ONPU "ABORTED. CTRL+XF5 to NEXT.");
         }
       } else {
         // next music

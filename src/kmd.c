@@ -7,8 +7,6 @@
 #include "himem.h"
 #include "kmd.h"
 
-static uint8_t BLANKS[] = "                                                                                                      ";
-
 //
 //  initialize kmd handle
 //

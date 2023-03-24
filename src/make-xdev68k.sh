@@ -7,7 +7,7 @@ fi
 
 TARGET_FILE="S44BGP.X"
 DOC_FILE="../S44BGP.DOC"
-ZIP_FILE="../../S44BP040.ZIP"
+ZIP_FILE="../../S44BP041.ZIP"
 
 CC=${XDEV68K_DIR}/m68k-toolchain/bin/m68k-elf-gcc
 GAS2HAS="${XDEV68K_DIR}/util/x68k_gas2has.pl -cpu 68000 -inc doscall.inc -inc iocscall.inc"
